@@ -1271,29 +1271,19 @@ class Exporter:
     @try_export
     def export_rknn(self, prefix=colorstr("RKNN:")):
         """Export YOLO model to RKNN format."""
-        LOGGER.info(f"\n{prefix} starting export with rknn-toolkit2...")
-
-        check_requirements("rknn-toolkit2")
-        if IS_COLAB:
-            # Prevent 'exit' from closing the notebook https://github.com/airockchip/rknn-toolkit2/issues/259
-            import builtins
-
-            builtins.exit = lambda: None
-
-        from rknn.api import RKNN
-
-        f = self.export_onnx()
-        export_path = Path(f"{Path(f).stem}_rknn_model")
-        export_path.mkdir(exist_ok=True)
-
-        rknn = RKNN(verbose=False)
-        rknn.config(mean_values=[[0, 0, 0]], std_values=[[255, 255, 255]], target_platform=self.args.name)
-        rknn.load_onnx(model=f)
-        rknn.build(do_quantization=False)  # TODO: Add quantization support
-        f = f.replace(".onnx", f"-{self.args.name}.rknn")
-        rknn.export_rknn(f"{export_path / f}")
-        YAML.save(export_path / "metadata.yaml", self.metadata)
-        return export_path
+        import onnx
+        opset_version = self.args.opset or best_onnx_opset(onnx, cuda="cuda" in self.device.type)
+        LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset_version}...")
+        f = str(self.file).replace(self.file.suffix, f'.onnx')
+        
+        torch2onnx(
+            self.model,
+            self.im[0:1,:,:,:],
+            f,
+            opset=opset_version,
+            input_names=["images"]
+        )
+        return f
 
     @try_export
     def export_imx(self, prefix=colorstr("IMX:")):
@@ -1590,3 +1580,20 @@ class NMSModel(torch.nn.Module):
             pad = (0, 0, 0, self.args.max_det - dets.shape[0])
             out[i] = torch.nn.functional.pad(dets, pad)
         return (out[:bs], preds[1]) if self.model.task == "segment" else out[:bs]
+
+
+def export(cfg=DEFAULT_CFG):
+    """Export a YOLO model to a specific format."""
+    cfg.model = cfg.model or 'yolo26n.yaml'
+    cfg.format = cfg.format or 'onnx'
+    from ultralytics import YOLO
+    model = YOLO(cfg.model)
+    model.export(**vars(cfg))
+
+
+if __name__ == '__main__':
+    """
+    CLI:
+    yolo mode=export model=yolo11n.yaml format=onnx
+    """
+    export()

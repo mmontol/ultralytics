@@ -140,6 +140,12 @@ class Detect(nn.Module):
         if box_head is None or cls_head is None:  # for fused inference
             return dict()
         bs = x[0].shape[0]  # batch size
+        if self.export and self.format == "rknn":  # for RKNN export
+            z = []
+            for i in range(self.nl):
+                z.append(torch.cat((box_head[i](x[i]), cls_head[i](x[i]).sigmoid()), 1))
+            return z
+        
         boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
         return dict(boxes=boxes, scores=scores, feats=x)
@@ -153,6 +159,8 @@ class Detect(nn.Module):
             x_detach = [xi.detach() for xi in x]
             one2one = self.forward_head(x_detach, **self.one2one)
             preds = {"one2many": preds, "one2one": one2one}
+        if self.export and self.format == "rknn":
+            return one2one
         if self.training:
             return preds
         y = self._inference(preds["one2one"] if self.end2end else preds)
@@ -330,6 +338,14 @@ class Segment(Detect):
         """Concatenates and returns predicted bounding boxes, class probabilities, and mask coefficients."""
         preds = super().forward_head(x, box_head, cls_head)
         if mask_head is not None:
+            if self.export and self.format == 'rknn':
+                mask_coefficient = [mask_head[i](x[i]) for i in range(self.nl)]
+                bo = len(preds)//3
+                relocated = []
+                for i in range(len(mask_coefficient)):
+                    relocated.extend(preds[i*bo:(i+1)*bo])
+                    relocated.extend([mask_coefficient[i]])
+                return relocated
             bs = x[0].shape[0]  # batch size
             preds["mask_coefficient"] = torch.cat([mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)
         return preds
@@ -396,6 +412,9 @@ class Segment26(Segment):
         outputs = Detect.forward(self, x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x)  # mask protos
+        if self.export and self.format == 'rknn':
+            outputs.extend([proto])
+            return outputs
         if isinstance(preds, dict):  # training and validating during training
             if self.end2end:
                 preds["one2many"]["proto"] = proto
@@ -540,7 +559,12 @@ class OBB26(OBB):
             bs = x[0].shape[0]  # batch size
             angle = torch.cat(
                 [angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2
-            )  # OBB theta logits (raw output without sigmoid transformation)
+            )  # OBB theta logits (raw output without sigmoid transformation)          
+            if self.export and self.format == 'rknn':
+                y=[]
+                y.extend(preds)
+                y.extend([angle])
+                return y
             preds["angle"] = angle
         return preds
 
@@ -735,6 +759,16 @@ class Pose26(Pose):
         if pose_head is not None:
             bs = x[0].shape[0]  # batch size
             features = [pose_head[i](x[i]) for i in range(self.nl)]
+            if self.export and self.format == 'rknn':
+                y = []
+                y.append(preds)
+                self.export = False
+                x = Detect.forward(self, x)
+                self.export = True
+                kpt = torch.cat([kpts_head[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
+                pred_kpt = self.kpts_decode(kpt)
+                y.append(pred_kpt)
+                return y
             preds["kpts"] = torch.cat([kpts_head[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
             if self.training:
                 preds["kpts_sigma"] = torch.cat(
@@ -757,6 +791,8 @@ class Pose26(Pose):
             a = (y[:, :, :2] + self.anchors) * self.strides
             if ndim == 3:
                 a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
+            if self.format == 'rknn':
+                return a
             return a.view(bs, self.nk, -1)
         else:
             y = kpts.clone()
