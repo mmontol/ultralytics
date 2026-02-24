@@ -154,13 +154,15 @@ class Detect(nn.Module):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if self.export and self.format == "rknn":
+            x_detach = [xi.detach() for xi in x]
+            return self.forward_head(x_detach, **self.one2one)
+
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
             one2one = self.forward_head(x_detach, **self.one2one)
             preds = {"one2many": preds, "one2one": one2one}
-        if self.export and self.format == "rknn":
-            return one2one
         if self.training:
             return preds
         y = self._inference(preds["one2one"] if self.end2end else preds)
